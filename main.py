@@ -1,7 +1,6 @@
-
 import discord
+from discord import app_commands
 from discord.ext import commands
-from discord.ext import tasks
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -39,34 +38,50 @@ async def on_ready():
     
     # Set bot activity
     await bot.change_presence(
-        activity=discord.Game(name="Chess | !chess help")
+        activity=discord.Game(name="Chess | /chess help")
     )
     
     # Register chess commands
     setup_chess_commands(bot)
     logger.info("Chess commands registered")
-
-@bot.event
-async def on_command_error(ctx, error):
-    """Handle command errors"""
-    if isinstance(error, commands.CommandNotFound):
-        return  # Ignore command not found errors
     
-    if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"Missing required argument: {error.param.name}. Use `!chess help` for command usage.")
+    # Sync commands with Discord
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logger.error(f"Failed to sync commands: {e}")
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Handle slash command errors"""
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"This command is on cooldown. Try again in {error.retry_after:.2f} seconds.", 
+            ephemeral=True
+        )
         return
     
-    if isinstance(error, commands.BadArgument):
-        await ctx.send(f"Invalid argument: {str(error)}. Use `!chess help` for command usage.")
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "You don't have permission to use this command.", 
+            ephemeral=True
+        )
         return
     
     # Log unexpected errors
-    logger.error(f"Command error in {ctx.command}: {str(error)}")
+    logger.error(f"Command error in {interaction.command}: {str(error)}")
     logger.error(''.join(traceback.format_exception(type(error), error, error.__traceback__)))
     
     # Notify user
     error_message = str(error) or "An unknown error occurred"
-    await ctx.send(f"Error executing command: {error_message}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(f"Error executing command: {error_message}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Error executing command: {error_message}", ephemeral=True)
+    except Exception as e:
+        logger.error(f"Failed to send error message: {e}")
 
 def run_bot():
     """Run the bot"""
