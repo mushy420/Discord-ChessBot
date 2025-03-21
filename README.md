@@ -1,3 +1,4 @@
+
 # ChessBot - Discord Chess Bot
 
 A Discord bot that allows users to play chess against each other directly in Discord channels.
@@ -10,8 +11,8 @@ A Discord bot that allows users to play chess against each other directly in Dis
    pip install -r requirements.txt
    ```
 3. Create a Discord bot at the [Discord Developer Portal](https://discord.com/developers/applications)
-4. Enable the necessary intents (Message Content, Server Members, Reactions)
-5. Add the bot to your server with appropriate permissions
+4. Enable the necessary intents (Message Content, Server Members)
+5. Add the bot to your server with the `applications.commands` scope (for slash commands)
 6. Copy your bot token from the Discord Developer Portal
 7. Configure the `.env` file:
    ```
@@ -26,24 +27,24 @@ A Discord bot that allows users to play chess against each other directly in Dis
 
 ## Commands
 
-All commands use the `!chess` prefix.
+All commands use the `/chess` prefix.
 
 | Command | Description | Usage |
 |---------|-------------|-------|
-| `!chess help` | Display help information | `!chess help` |
-| `!chess challenge @user` | Challenge another user to a game | `!chess challenge @username` |
-| `!chess move` | Make a move in the current game | `!chess move e4` or `!chess move e2e4` |
-| `!chess board` | Display the current board state | `!chess board` |
-| `!chess resign` | Resign from the current game | `!chess resign` |
-| `!chess pgn` | Show the PGN of the current game | `!chess pgn` |
-| `!chess suggest` | Get move suggestions | `!chess suggest` |
-| `!chess analyze` | Analyze the current position | `!chess analyze` |
-| `!chess explain` | Get a simple explanation of the current position | `!chess explain` |
+| `/chess help` | Display help information | `/chess help` |
+| `/chess challenge` | Challenge another user to a game | `/chess challenge @username` |
+| `/chess move` | Make a move in the current game | `/chess move e4` or `/chess move e2e4` |
+| `/chess board` | Display the current board state | `/chess board` |
+| `/chess resign` | Resign from the current game | `/chess resign` |
+| `/chess pgn` | Show the PGN of the current game | `/chess pgn` |
+| `/chess suggest` | Get move suggestions | `/chess suggest` |
+| `/chess analyze` | Analyze the current position | `/chess analyze` |
+| `/chess explain` | Get a simple explanation of the current position | `/chess explain` |
 
 ## Game Features
 
 - Visual chess board representation in Discord
-- Challenge system with accept/decline reactions
+- Challenge system with accept/decline buttons
 - Support for algebraic notation (both `e4` and `e2e4` formats)
 - Multiple simultaneous games in different channels
 - Game state persistence between bot restarts
@@ -62,5 +63,6 @@ You can adjust the following settings in the `.env` file:
 - Games are saved in a `games.json` file that's created automatically
 - Logs are written to `chessbot.log` for troubleshooting
 - The bot supports multiple games across different channels
+- Uses Discord's slash command system for better user experience
 
   Copyright 2025 CoinKing
