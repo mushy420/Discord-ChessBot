@@ -1,5 +1,7 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
+from discord.ext import tasks
 import asyncio
 import chess
 from typing import Dict, List, Optional, Tuple, Union
@@ -64,70 +66,86 @@ def setup_chess_commands(bot):
     
     cleanup_loop.start()
     
-    @bot.command(name="chess")
-    async def chess(ctx):
-        """Main chess command group"""
-        await show_help(ctx)
+    # Create a chess command group
+    chess_group = app_commands.Group(name="chess", description="Commands for playing chess")
     
-    @bot.command(name="chess help")
-    async def show_help(ctx):
-        """Show help information"""
+    @chess_group.command(name="help")
+    async def chess_help(interaction: discord.Interaction):
+        """Show help information for chess commands"""
         embed = await embed_renderer.render_help_embed()
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
     
-    @bot.command(name="chess challenge")
-    async def challenge(ctx, opponent: discord.Member = None):
-        """Challenge a user to a chess game"""
-        if cooldown_manager.is_on_cooldown(ctx.author.id, "challenge", 10):
-            cooldown = cooldown_manager.get_remaining_cooldown(ctx.author.id, "challenge")
-            await ctx.send(f"Please wait {cooldown:.1f} seconds before issuing another challenge.")
+    @chess_group.command(name="challenge")
+    @app_commands.describe(opponent="The player you want to challenge to a chess game")
+    async def chess_challenge(interaction: discord.Interaction, opponent: discord.Member):
+        """Challenge another user to a chess game"""
+        if cooldown_manager.is_on_cooldown(interaction.user.id, "challenge", 10):
+            cooldown = cooldown_manager.get_remaining_cooldown(interaction.user.id, "challenge")
+            await interaction.response.send_message(
+                f"Please wait {cooldown:.1f} seconds before issuing another challenge.",
+                ephemeral=True
+            )
             return
         
         try:
             # Check if opponent is valid
-            if not opponent:
-                await ctx.send("You need to specify an opponent to challenge. Example: `!chess challenge @user`")
-                return
-                
-            if opponent.id == ctx.author.id:
-                await ctx.send("You can't challenge yourself to a game.")
+            if opponent.id == interaction.user.id:
+                await interaction.response.send_message("You can't challenge yourself to a game.", ephemeral=True)
                 return
                 
             if opponent.bot:
-                await ctx.send("You can't challenge a bot to a game.")
+                await interaction.response.send_message("You can't challenge a bot to a game.", ephemeral=True)
                 return
             
             # Check if already in a game in this channel
-            existing_game = game_manager.get_player_game(ctx.author.id, ctx.channel.id)
+            existing_game = game_manager.get_player_game(interaction.user.id, interaction.channel_id)
             if existing_game:
-                await ctx.send("You are already in a game in this channel. Finish or resign that game first.")
+                await interaction.response.send_message(
+                    "You are already in a game in this channel. Finish or resign that game first.",
+                    ephemeral=True
+                )
                 return
                 
             # Check if there's already an active challenge in this channel
-            if ctx.channel.id in active_challenges:
-                await ctx.send("There's already an active challenge in this channel. Wait for it to be accepted, declined, or expire.")
+            if interaction.channel_id in active_challenges:
+                await interaction.response.send_message(
+                    "There's already an active challenge in this channel. Wait for it to be accepted, declined, or expire.",
+                    ephemeral=True
+                )
                 return
             
             # Create and send challenge embed with buttons
-            challenge_embed = await embed_renderer.render_challenge_embed(ctx.author, opponent)
+            challenge_embed = await embed_renderer.render_challenge_embed(interaction.user, opponent)
             
             # Create the button view
-            view = ChallengeButtons(ctx.author, opponent)
-            challenge_message = await ctx.send(embed=challenge_embed, view=view)
+            view = ChallengeButtons(interaction.user, opponent)
+            
+            # Send the challenge message
+            await interaction.response.send_message(
+                f"{opponent.mention}, you've been challenged to a chess game by {interaction.user.mention}!",
+                embed=challenge_embed,
+                view=view
+            )
             
             # Store challenge data with 5-minute expiration
             expire_time = time.time() + 300  # 5 minutes
-            active_challenges[ctx.channel.id] = (ctx.author.id, opponent.id, expire_time)
+            active_challenges[interaction.channel_id] = (interaction.user.id, opponent.id, expire_time)
             
             # Wait for the button response
             await view.wait()
             
             # Remove from active challenges
-            active_challenges.pop(ctx.channel.id, None)
+            active_challenges.pop(interaction.channel_id, None)
             
+            # Handle the response
             if view.response is True:
                 # Challenge accepted
-                await start_game(ctx.channel, ctx.author, opponent)
+                game = await start_game(interaction.channel, interaction.user, opponent)
+                if game:
+                    await interaction.followup.send(
+                        f"Game started! {interaction.user.mention} (White) vs {opponent.mention} (Black)\n"
+                        f"{interaction.user.mention}'s turn. Make a move using `/chess move`"
+                    )
             elif view.response is False:
                 # Challenge declined
                 decline_embed = discord.Embed(
@@ -135,25 +153,17 @@ def setup_chess_commands(bot):
                     description=f"{opponent.mention} has declined the chess challenge.", 
                     color=discord.Color.red()
                 )
-                await ctx.send(embed=decline_embed)
-                
-                # Update the original challenge message
-                challenge_embed.description = f"{ctx.author.mention}'s challenge to {opponent.mention} was declined."
-                challenge_embed.color = discord.Color.red()
-                await challenge_message.edit(embed=challenge_embed, view=None)
+                await interaction.followup.send(embed=decline_embed)
             else:
                 # Challenge expired
-                try:
-                    # Update the original challenge message if it still exists
-                    challenge_embed.description = f"{ctx.author.mention}'s challenge to {opponent.mention} has expired."
-                    challenge_embed.color = discord.Color.dark_grey()
-                    await challenge_message.edit(embed=challenge_embed, view=None)
-                except Exception:
-                    pass
+                await interaction.followup.send(
+                    f"{interaction.user.mention}'s challenge to {opponent.mention} has expired.",
+                    ephemeral=True
+                )
         
         except Exception as e:
             logger.error(f"Error in challenge command: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            await interaction.followup.send(f"An error occurred: {format_exception(e)}")
     
     async def start_game(channel, white_player, black_player):
         """Start a new chess game between two players"""
@@ -167,19 +177,12 @@ def setup_chess_commands(bot):
             )
             
             start_message = await channel.send(
-                content=f"Game started! {white_player.mention} (White) vs {black_player.mention} (Black)",
                 embed=embed,
                 file=file
             )
             
             # Store the message ID for future updates
             game.last_message_id = start_message.id
-            
-            # Send instructions
-            await channel.send(
-                f"{white_player.mention}'s turn. Make a move using `!chess move <move>` "
-                "(e.g., `!chess move e4` or `!chess move e2e4`)"
-            )
             
             return game
             
@@ -188,36 +191,45 @@ def setup_chess_commands(bot):
             await channel.send(f"Error starting game: {format_exception(e)}")
             return None
     
-    @bot.command(name="chess move")
-    async def make_move(ctx, *, move_str: str = None):
-        """Make a move in the current game"""
+    @chess_group.command(name="move")
+    @app_commands.describe(move="Your chess move in algebraic notation (e.g., e4 or e2e4)")
+    async def chess_move(interaction: discord.Interaction, move: str):
+        """Make a move in the current chess game"""
         try:
-            if not move_str:
-                await ctx.send("Please specify a move. Example: `!chess move e4` or `!chess move e2e4`")
-                return
-                
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel. Start one with `!chess challenge @user`")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel. Start one with `/chess challenge`",
+                    ephemeral=True
+                )
                 return
                 
             # Check if it's the player's turn
-            if not game.is_player_turn(ctx.author.id):
+            if not game.is_player_turn(interaction.user.id):
                 current_player_id = game.current_player_id
                 try:
                     current_player = await bot.fetch_user(current_player_id)
-                    await ctx.send(f"It's not your turn. Waiting for {current_player.mention} to move.")
+                    await interaction.response.send_message(
+                        f"It's not your turn. Waiting for {current_player.mention} to move.",
+                        ephemeral=True
+                    )
                 except Exception:
-                    await ctx.send(f"It's not your turn. Waiting for the other player to move.")
+                    await interaction.response.send_message(
+                        f"It's not your turn. Waiting for the other player to move.",
+                        ephemeral=True
+                    )
                 return
             
+            # Acknowledge the command
+            await interaction.response.defer()
+            
             # Make the move
-            success, message = game.make_move(move_str)
+            success, message = game.make_move(move)
             
             if not success:
-                await ctx.send(f"Invalid move: {message}")
+                await interaction.followup.send(f"Invalid move: {message}")
                 return
             
             # Get the players
@@ -230,45 +242,54 @@ def setup_chess_commands(bot):
             )
             
             # Send the updated board
-            move_message = await ctx.send(embed=embed, file=file)
-            game.last_message_id = move_message.id
+            move_message = await interaction.followup.send(embed=embed, file=file)
+            
+            # Update the last message ID if possible
+            if hasattr(move_message, "id"):
+                game.last_message_id = move_message.id
             
             # Notify about status
             if message:  # Status message from the move (checkmate, etc.)
-                await ctx.send(message)
+                await interaction.channel.send(message)
                 
                 if game.status == "finished":
                     # Game is over, send final message
                     if game.result == "white_win":
-                        await ctx.send(f"{white_user.mention} (White) wins! Game over.")
+                        await interaction.channel.send(f"{white_user.mention} (White) wins! Game over.")
                     elif game.result == "black_win":
-                        await ctx.send(f"{black_user.mention} (Black) wins! Game over.")
+                        await interaction.channel.send(f"{black_user.mention} (Black) wins! Game over.")
                     else:
-                        await ctx.send("Game ended in a draw!")
+                        await interaction.channel.send("Game ended in a draw!")
                         
                     # Include PGN
                     pgn = game.get_pgn()
-                    await ctx.send(f"Game PGN:\n```{pgn}```")
+                    await interaction.channel.send(f"Game PGN:\n```{pgn}```")
             
             # If game continues, notify next player
             if game.status == "active":
                 next_player_id = game.current_player_id
                 next_player = await bot.fetch_user(next_player_id)
-                await ctx.send(f"{next_player.mention}'s turn. Make a move using `!chess move <move>`")
+                await interaction.channel.send(f"{next_player.mention}'s turn. Make a move using `/chess move`")
         
         except Exception as e:
             logger.error(f"Error making move: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"An error occurred: {format_exception(e)}")
+            else:
+                await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess board")
-    async def show_board(ctx):
+    @chess_group.command(name="board")
+    async def chess_board(interaction: discord.Interaction):
         """Show the current board state"""
         try:
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel. Start one with `!chess challenge @user`")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel. Start one with `/chess challenge`",
+                    ephemeral=True
+                )
                 return
             
             # Get the players
@@ -281,28 +302,34 @@ def setup_chess_commands(bot):
             )
             
             # Send the board
-            await ctx.send(embed=embed, file=file)
+            await interaction.response.send_message(embed=embed, file=file)
             
         except Exception as e:
             logger.error(f"Error showing board: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess resign")
-    async def resign_game(ctx):
+    @chess_group.command(name="resign")
+    async def chess_resign(interaction: discord.Interaction):
         """Resign from the current game"""
         try:
             # Find the player's game in this channel
-            game = game_manager.get_player_game(ctx.author.id, ctx.channel.id)
+            game = game_manager.get_player_game(interaction.user.id, interaction.channel_id)
             
             if not game:
-                await ctx.send("You are not in an active chess game in this channel.")
+                await interaction.response.send_message(
+                    "You are not in an active chess game in this channel.",
+                    ephemeral=True
+                )
                 return
             
+            # Acknowledge the command
+            await interaction.response.defer()
+            
             # Resign the game
-            result = game_manager.resign_game(game.game_id, ctx.author.id)
+            result = game_manager.resign_game(game.game_id, interaction.user.id)
             
             if not result:
-                await ctx.send("Failed to resign the game.")
+                await interaction.followup.send("Failed to resign the game.")
                 return
             
             # Get the players
@@ -310,7 +337,7 @@ def setup_chess_commands(bot):
             black_user = await bot.fetch_user(game.black_id)
             
             # Determine winner
-            if ctx.author.id == game.white_id:
+            if interaction.user.id == game.white_id:
                 winner = black_user
                 winner_color = "Black"
             else:
@@ -318,7 +345,7 @@ def setup_chess_commands(bot):
                 winner_color = "White"
             
             # Send resign message
-            await ctx.send(f"{ctx.author.mention} has resigned. {winner.mention} ({winner_color}) wins!")
+            await interaction.followup.send(f"{interaction.user.mention} has resigned. {winner.mention} ({winner_color}) wins!")
             
             # Render final board
             embed, file = await embed_renderer.render_game_embed(
@@ -326,58 +353,73 @@ def setup_chess_commands(bot):
             )
             
             # Send the final board
-            await ctx.send(embed=embed, file=file)
+            await interaction.channel.send(embed=embed, file=file)
             
             # Include PGN
             pgn = game.get_pgn()
-            await ctx.send(f"Game PGN:\n```{pgn}```")
+            await interaction.channel.send(f"Game PGN:\n```{pgn}```")
             
         except Exception as e:
             logger.error(f"Error resigning game: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"An error occurred: {format_exception(e)}")
+            else:
+                await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess pgn")
-    async def show_pgn(ctx):
+    @chess_group.command(name="pgn")
+    async def chess_pgn(interaction: discord.Interaction):
         """Show the PGN of the current game"""
         try:
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel.")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel.",
+                    ephemeral=True
+                )
                 return
             
             # Get the PGN
             pgn = game.get_pgn()
             
             # Send the PGN
-            await ctx.send(f"Game PGN:\n```{pgn}```")
+            await interaction.response.send_message(f"Game PGN:\n```{pgn}```")
             
         except Exception as e:
             logger.error(f"Error showing PGN: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess suggest")
-    async def suggest_move(ctx):
+    @chess_group.command(name="suggest")
+    async def chess_suggest(interaction: discord.Interaction):
         """Suggest moves for the current position"""
         try:
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel.")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel.",
+                    ephemeral=True
+                )
                 return
             
             # Check if it's the player's turn
-            if not game.is_player_turn(ctx.author.id):
-                await ctx.send("It's not your turn. You can only get suggestions on your turn.")
+            if not game.is_player_turn(interaction.user.id):
+                await interaction.response.send_message(
+                    "It's not your turn. You can only get suggestions on your turn.",
+                    ephemeral=True
+                )
                 return
+            
+            # Acknowledge the command
+            await interaction.response.defer()
             
             # Get move suggestions
             suggestions = game.get_move_suggestions(count=3)
             
             if not suggestions:
-                await ctx.send("No move suggestions available.")
+                await interaction.followup.send("No move suggestions available.")
                 return
             
             # Format suggestions
@@ -385,22 +427,31 @@ def setup_chess_commands(bot):
             for i, (move, eval_score) in enumerate(suggestions):
                 suggestions_text += f"{i+1}. **{move}** (Evaluation: {eval_score:.2f})\n"
             
-            await ctx.send(suggestions_text)
+            await interaction.followup.send(suggestions_text)
             
         except Exception as e:
             logger.error(f"Error suggesting move: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"An error occurred: {format_exception(e)}")
+            else:
+                await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess analyze")
-    async def analyze_position(ctx):
+    @chess_group.command(name="analyze")
+    async def chess_analyze(interaction: discord.Interaction):
         """Analyze the current position"""
         try:
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel.")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel.",
+                    ephemeral=True
+                )
                 return
+            
+            # Acknowledge the command
+            await interaction.response.defer()
             
             # Get move suggestions for analysis
             suggestions = game.get_move_suggestions(count=3)
@@ -409,22 +460,31 @@ def setup_chess_commands(bot):
             analysis_embed = await embed_renderer.render_analysis_embed(game, suggestions)
             
             # Send the analysis
-            await ctx.send(embed=analysis_embed)
+            await interaction.followup.send(embed=analysis_embed)
             
         except Exception as e:
             logger.error(f"Error analyzing position: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"An error occurred: {format_exception(e)}")
+            else:
+                await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
     
-    @bot.command(name="chess explain")
-    async def explain_position(ctx):
+    @chess_group.command(name="explain")
+    async def chess_explain(interaction: discord.Interaction):
         """Explain the current position"""
         try:
             # Find the current game in this channel
-            game = game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(interaction.channel_id)
             
             if not game:
-                await ctx.send("There is no active chess game in this channel.")
+                await interaction.response.send_message(
+                    "There is no active chess game in this channel.",
+                    ephemeral=True
+                )
                 return
+            
+            # Acknowledge the command
+            await interaction.response.defer()
             
             # Get the board state
             board = game.board
@@ -504,8 +564,14 @@ def setup_chess_commands(bot):
                 explanation.append(f"**Pawn Structure**: Black has {black_doubled} doubled pawn(s).")
             
             # Send the explanation
-            await ctx.send("**Position Analysis**\n\n" + "\n".join(explanation))
+            await interaction.followup.send("**Position Analysis**\n\n" + "\n".join(explanation))
             
         except Exception as e:
             logger.error(f"Error explaining position: {str(e)}")
-            await ctx.send(f"An error occurred: {format_exception(e)}")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"An error occurred: {format_exception(e)}")
+            else:
+                await interaction.response.send_message(f"An error occurred: {format_exception(e)}", ephemeral=True)
+    
+    # Add the chess command group to the bot
+    bot.tree.add_command(chess_group)
