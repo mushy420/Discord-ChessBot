@@ -1,6 +1,7 @@
 
 import discord
 from discord.ext import commands
+from discord.ext import tasks
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -10,7 +11,7 @@ import traceback
 from typing import Dict, List, Optional
 
 from utils import setup_logging, logger
-from bot_commands import ChessCommands
+from bot_commands import setup_chess_commands
 
 # Load environment variables
 load_dotenv()
@@ -26,7 +27,6 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True  # Needed to read message content
 intents.members = True  # Needed to access member information
-intents.reactions = True  # Needed for reaction handling
 
 # Create bot instance
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
@@ -43,7 +43,7 @@ async def on_ready():
     )
     
     # Register chess commands
-    await bot.add_cog(ChessCommands(bot))
+    setup_chess_commands(bot)
     logger.info("Chess commands registered")
 
 @bot.event
@@ -67,19 +67,6 @@ async def on_command_error(ctx, error):
     # Notify user
     error_message = str(error) or "An unknown error occurred"
     await ctx.send(f"Error executing command: {error_message}")
-
-@bot.event
-async def on_message(message):
-    """Process messages"""
-    # Don't respond to self or other bots
-    if message.author.bot:
-        return
-    
-    # Process commands
-    await bot.process_commands(message)
-    
-    # Add custom message handling here if needed
-    # This could include responding to chess-related keywords, etc.
 
 def run_bot():
     """Run the bot"""
