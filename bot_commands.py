@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 import asyncio
@@ -12,83 +11,75 @@ from chess_engine import GameManager, ChessGame
 from ui_renderer import ChessEmbedRenderer
 from utils import logger, CooldownManager, send_with_retry, format_exception
 
-class ChessCommands(commands.Cog):
-    """Chess game commands for Discord"""
+# Define button classes for challenge responses
+class ChallengeButtons(discord.ui.View):
+    def __init__(self, challenger, challenged, timeout=300):
+        super().__init__(timeout=timeout)
+        self.challenger = challenger
+        self.challenged = challenged
+        self.response = None
     
-    def __init__(self, bot):
-        """Initialize chess commands"""
-        self.bot = bot
-        self.game_manager = GameManager()
-        self.embed_renderer = ChessEmbedRenderer()
-        self.cooldown_manager = CooldownManager()
-        self.active_challenges = {}  # channel_id -> (message_id, challenger_id, challenged_id, expire_time)
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.green, emoji="✅")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenged.id:
+            await interaction.response.send_message("Only the challenged player can accept this game", ephemeral=True)
+            return
         
-        # Start background task for cleaning up stale games and challenges
-        self.cleanup_task = asyncio.create_task(self.cleanup_loop())
-        logger.info("Chess commands initialized")
+        self.response = True
+        self.stop()
+        await interaction.response.defer()
     
-    def cog_unload(self):
-        """Clean up when the cog is unloaded"""
-        # Cancel background task
-        if self.cleanup_task:
-            self.cleanup_task.cancel()
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red, emoji="❌")
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenged.id:
+            await interaction.response.send_message("Only the challenged player can respond to this challenge", ephemeral=True)
+            return
+        
+        self.response = False
+        self.stop()
+        await interaction.response.defer()
     
-    async def cleanup_loop(self):
-        """Background task to clean up stale games and challenges"""
+    async def on_timeout(self):
+        self.response = None
+        self.stop()
+
+def setup_chess_commands(bot):
+    """Set up all chess commands for the bot"""
+    game_manager = GameManager()
+    embed_renderer = ChessEmbedRenderer()
+    cooldown_manager = CooldownManager()
+    active_challenges = {}  # channel_id -> challenger_id, challenged_id, expire_time
+    
+    # Start background task for cleaning up stale games and challenges
+    @tasks.loop(minutes=5.0)
+    async def cleanup_loop():
+        """Background task to clean up stale games"""
         try:
-            while True:
-                # Clean up stale games every hour
-                self.game_manager.cleanup_stale_games(max_inactive_time=3600)
-                
-                # Clean up expired challenges
-                current_time = time.time()
-                expired_challenges = []
-                
-                for channel_id, (message_id, challenger_id, challenged_id, expire_time) in self.active_challenges.items():
-                    if current_time > expire_time:
-                        expired_challenges.append(channel_id)
-                        
-                        # Try to edit the message to show it expired
-                        try:
-                            channel = self.bot.get_channel(channel_id)
-                            if channel:
-                                message = await channel.fetch_message(message_id)
-                                if message:
-                                    embed = message.embeds[0]
-                                    embed.description = "This challenge has expired."
-                                    embed.color = discord.Color.dark_grey()
-                                    await message.edit(embed=embed)
-                        except Exception as e:
-                            logger.warning(f"Could not edit expired challenge message: {str(e)}")
-                
-                # Remove expired challenges
-                for channel_id in expired_challenges:
-                    self.active_challenges.pop(channel_id, None)
-                
-                # Sleep for a minute before next check
-                await asyncio.sleep(60)
-                
-        except asyncio.CancelledError:
-            logger.info("Cleanup task cancelled")
+            # Clean up stale games every 5 minutes
+            stale_count = game_manager.cleanup_stale_games(max_inactive_time=3600)
+            if stale_count > 0:
+                logger.info(f"Cleaned up {stale_count} stale games")
         except Exception as e:
             logger.error(f"Error in cleanup loop: {str(e)}")
     
-    @commands.group(name="chess", invoke_without_command=True)
-    async def chess(self, ctx):
-        """Main chess command group"""
-        await self.show_help(ctx)
+    cleanup_loop.start()
     
-    @chess.command(name="help")
-    async def show_help(self, ctx):
+    @bot.command(name="chess")
+    async def chess(ctx):
+        """Main chess command group"""
+        await show_help(ctx)
+    
+    @bot.command(name="chess help")
+    async def show_help(ctx):
         """Show help information"""
-        embed = await self.embed_renderer.render_help_embed()
+        embed = await embed_renderer.render_help_embed()
         await ctx.send(embed=embed)
     
-    @chess.command(name="challenge")
-    async def challenge(self, ctx, opponent: discord.Member = None):
+    @bot.command(name="chess challenge")
+    async def challenge(ctx, opponent: discord.Member = None):
         """Challenge a user to a chess game"""
-        if self.cooldown_manager.is_on_cooldown(ctx.author.id, "challenge", 10):
-            cooldown = self.cooldown_manager.get_remaining_cooldown(ctx.author.id, "challenge")
+        if cooldown_manager.is_on_cooldown(ctx.author.id, "challenge", 10):
+            cooldown = cooldown_manager.get_remaining_cooldown(ctx.author.id, "challenge")
             await ctx.send(f"Please wait {cooldown:.1f} seconds before issuing another challenge.")
             return
         
@@ -107,68 +98,56 @@ class ChessCommands(commands.Cog):
                 return
             
             # Check if already in a game in this channel
-            existing_game = self.game_manager.get_player_game(ctx.author.id, ctx.channel.id)
+            existing_game = game_manager.get_player_game(ctx.author.id, ctx.channel.id)
             if existing_game:
                 await ctx.send("You are already in a game in this channel. Finish or resign that game first.")
                 return
                 
             # Check if there's already an active challenge in this channel
-            if ctx.channel.id in self.active_challenges:
+            if ctx.channel.id in active_challenges:
                 await ctx.send("There's already an active challenge in this channel. Wait for it to be accepted, declined, or expire.")
                 return
             
-            # Create and send challenge embed
-            challenge_embed = await self.embed_renderer.render_challenge_embed(ctx.author, opponent)
-            challenge_message = await ctx.send(embed=challenge_embed)
+            # Create and send challenge embed with buttons
+            challenge_embed = await embed_renderer.render_challenge_embed(ctx.author, opponent)
             
-            # Add reactions for accepting/declining
-            await challenge_message.add_reaction("✅")
-            await challenge_message.add_reaction("❌")
+            # Create the button view
+            view = ChallengeButtons(ctx.author, opponent)
+            challenge_message = await ctx.send(embed=challenge_embed, view=view)
             
             # Store challenge data with 5-minute expiration
             expire_time = time.time() + 300  # 5 minutes
-            self.active_challenges[ctx.channel.id] = (challenge_message.id, ctx.author.id, opponent.id, expire_time)
+            active_challenges[ctx.channel.id] = (ctx.author.id, opponent.id, expire_time)
             
-            # Set up reaction listeners
-            def check(reaction, user):
-                return (
-                    reaction.message.id == challenge_message.id and 
-                    user.id == opponent.id and
-                    str(reaction.emoji) in ["✅", "❌"]
+            # Wait for the button response
+            await view.wait()
+            
+            # Remove from active challenges
+            active_challenges.pop(ctx.channel.id, None)
+            
+            if view.response is True:
+                # Challenge accepted
+                await start_game(ctx.channel, ctx.author, opponent)
+            elif view.response is False:
+                # Challenge declined
+                decline_embed = discord.Embed(
+                    title="Chess Challenge Declined", 
+                    description=f"{opponent.mention} has declined the chess challenge.", 
+                    color=discord.Color.red()
                 )
-            
-            try:
-                reaction, user = await self.bot.wait_for('reaction_add', timeout=300.0, check=check)
+                await ctx.send(embed=decline_embed)
                 
-                # Remove from active challenges
-                self.active_challenges.pop(ctx.channel.id, None)
-                
-                if str(reaction.emoji) == "✅":
-                    # Challenge accepted
-                    await self.start_game(ctx.channel, ctx.author, opponent)
-                else:
-                    # Challenge declined
-                    decline_embed = discord.Embed(
-                        title="Chess Challenge Declined", 
-                        description=f"{opponent.mention} has declined the chess challenge.", 
-                        color=discord.Color.red()
-                    )
-                    await ctx.send(embed=decline_embed)
-                    
-                    # Update the original challenge message
-                    challenge_embed.description = f"{ctx.author.mention}'s challenge to {opponent.mention} was declined."
-                    challenge_embed.color = discord.Color.red()
-                    await challenge_message.edit(embed=challenge_embed)
-                    
-            except asyncio.TimeoutError:
+                # Update the original challenge message
+                challenge_embed.description = f"{ctx.author.mention}'s challenge to {opponent.mention} was declined."
+                challenge_embed.color = discord.Color.red()
+                await challenge_message.edit(embed=challenge_embed, view=None)
+            else:
                 # Challenge expired
-                self.active_challenges.pop(ctx.channel.id, None)
-                
                 try:
                     # Update the original challenge message if it still exists
                     challenge_embed.description = f"{ctx.author.mention}'s challenge to {opponent.mention} has expired."
                     challenge_embed.color = discord.Color.dark_grey()
-                    await challenge_message.edit(embed=challenge_embed)
+                    await challenge_message.edit(embed=challenge_embed, view=None)
                 except Exception:
                     pass
         
@@ -176,15 +155,15 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error in challenge command: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    async def start_game(self, channel, white_player, black_player):
+    async def start_game(channel, white_player, black_player):
         """Start a new chess game between two players"""
         try:
             # Create a new game
-            game = self.game_manager.create_game(white_player.id, black_player.id, channel.id)
+            game = game_manager.create_game(white_player.id, black_player.id, channel.id)
             
             # Render and send the initial board
-            embed, file = await self.embed_renderer.render_game_embed(
-                game, white_user=white_player, black_user=black_player, bot=self.bot
+            embed, file = await embed_renderer.render_game_embed(
+                game, white_user=white_player, black_user=black_player, bot=bot
             )
             
             start_message = await channel.send(
@@ -209,8 +188,8 @@ class ChessCommands(commands.Cog):
             await channel.send(f"Error starting game: {format_exception(e)}")
             return None
     
-    @chess.command(name="move")
-    async def make_move(self, ctx, *, move_str: str = None):
+    @bot.command(name="chess move")
+    async def make_move(ctx, *, move_str: str = None):
         """Make a move in the current game"""
         try:
             if not move_str:
@@ -218,7 +197,7 @@ class ChessCommands(commands.Cog):
                 return
                 
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel. Start one with `!chess challenge @user`")
@@ -228,7 +207,7 @@ class ChessCommands(commands.Cog):
             if not game.is_player_turn(ctx.author.id):
                 current_player_id = game.current_player_id
                 try:
-                    current_player = await self.bot.fetch_user(current_player_id)
+                    current_player = await bot.fetch_user(current_player_id)
                     await ctx.send(f"It's not your turn. Waiting for {current_player.mention} to move.")
                 except Exception:
                     await ctx.send(f"It's not your turn. Waiting for the other player to move.")
@@ -242,12 +221,12 @@ class ChessCommands(commands.Cog):
                 return
             
             # Get the players
-            white_user = await self.bot.fetch_user(game.white_id)
-            black_user = await self.bot.fetch_user(game.black_id)
+            white_user = await bot.fetch_user(game.white_id)
+            black_user = await bot.fetch_user(game.black_id)
             
             # Render the updated board
-            embed, file = await self.embed_renderer.render_game_embed(
-                game, white_user=white_user, black_user=black_user, bot=self.bot
+            embed, file = await embed_renderer.render_game_embed(
+                game, white_user=white_user, black_user=black_user, bot=bot
             )
             
             # Send the updated board
@@ -274,31 +253,31 @@ class ChessCommands(commands.Cog):
             # If game continues, notify next player
             if game.status == "active":
                 next_player_id = game.current_player_id
-                next_player = await self.bot.fetch_user(next_player_id)
+                next_player = await bot.fetch_user(next_player_id)
                 await ctx.send(f"{next_player.mention}'s turn. Make a move using `!chess move <move>`")
         
         except Exception as e:
             logger.error(f"Error making move: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="board")
-    async def show_board(self, ctx):
+    @bot.command(name="chess board")
+    async def show_board(ctx):
         """Show the current board state"""
         try:
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel. Start one with `!chess challenge @user`")
                 return
             
             # Get the players
-            white_user = await self.bot.fetch_user(game.white_id)
-            black_user = await self.bot.fetch_user(game.black_id)
+            white_user = await bot.fetch_user(game.white_id)
+            black_user = await bot.fetch_user(game.black_id)
             
             # Render the board
-            embed, file = await self.embed_renderer.render_game_embed(
-                game, white_user=white_user, black_user=black_user, bot=self.bot
+            embed, file = await embed_renderer.render_game_embed(
+                game, white_user=white_user, black_user=black_user, bot=bot
             )
             
             # Send the board
@@ -308,27 +287,27 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error showing board: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="resign")
-    async def resign_game(self, ctx):
+    @bot.command(name="chess resign")
+    async def resign_game(ctx):
         """Resign from the current game"""
         try:
             # Find the player's game in this channel
-            game = self.game_manager.get_player_game(ctx.author.id, ctx.channel.id)
+            game = game_manager.get_player_game(ctx.author.id, ctx.channel.id)
             
             if not game:
                 await ctx.send("You are not in an active chess game in this channel.")
                 return
             
             # Resign the game
-            result = self.game_manager.resign_game(game.game_id, ctx.author.id)
+            result = game_manager.resign_game(game.game_id, ctx.author.id)
             
             if not result:
                 await ctx.send("Failed to resign the game.")
                 return
             
             # Get the players
-            white_user = await self.bot.fetch_user(game.white_id)
-            black_user = await self.bot.fetch_user(game.black_id)
+            white_user = await bot.fetch_user(game.white_id)
+            black_user = await bot.fetch_user(game.black_id)
             
             # Determine winner
             if ctx.author.id == game.white_id:
@@ -342,8 +321,8 @@ class ChessCommands(commands.Cog):
             await ctx.send(f"{ctx.author.mention} has resigned. {winner.mention} ({winner_color}) wins!")
             
             # Render final board
-            embed, file = await self.embed_renderer.render_game_embed(
-                game, white_user=white_user, black_user=black_user, bot=self.bot
+            embed, file = await embed_renderer.render_game_embed(
+                game, white_user=white_user, black_user=black_user, bot=bot
             )
             
             # Send the final board
@@ -357,12 +336,12 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error resigning game: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="pgn")
-    async def show_pgn(self, ctx):
+    @bot.command(name="chess pgn")
+    async def show_pgn(ctx):
         """Show the PGN of the current game"""
         try:
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel.")
@@ -378,12 +357,12 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error showing PGN: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="suggest")
-    async def suggest_move(self, ctx):
+    @bot.command(name="chess suggest")
+    async def suggest_move(ctx):
         """Suggest moves for the current position"""
         try:
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel.")
@@ -412,12 +391,12 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error suggesting move: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="analyze")
-    async def analyze_position(self, ctx):
+    @bot.command(name="chess analyze")
+    async def analyze_position(ctx):
         """Analyze the current position"""
         try:
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel.")
@@ -427,7 +406,7 @@ class ChessCommands(commands.Cog):
             suggestions = game.get_move_suggestions(count=3)
             
             # Create analysis embed
-            analysis_embed = await self.embed_renderer.render_analysis_embed(game, suggestions)
+            analysis_embed = await embed_renderer.render_analysis_embed(game, suggestions)
             
             # Send the analysis
             await ctx.send(embed=analysis_embed)
@@ -436,12 +415,12 @@ class ChessCommands(commands.Cog):
             logger.error(f"Error analyzing position: {str(e)}")
             await ctx.send(f"An error occurred: {format_exception(e)}")
     
-    @chess.command(name="explain")
-    async def explain_position(self, ctx):
+    @bot.command(name="chess explain")
+    async def explain_position(ctx):
         """Explain the current position"""
         try:
             # Find the current game in this channel
-            game = self.game_manager.get_game_by_channel(ctx.channel.id)
+            game = game_manager.get_game_by_channel(ctx.channel.id)
             
             if not game:
                 await ctx.send("There is no active chess game in this channel.")
