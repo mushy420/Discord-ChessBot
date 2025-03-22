@@ -7,10 +7,10 @@ from dotenv import load_dotenv
 import logging
 import sys
 import traceback
+import time
 from typing import Dict, List, Optional
 
 from utils import setup_logging, logger
-from bot_commands import setup_chess_commands
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +29,12 @@ intents.members = True  # Needed to access member information
 
 # Create bot instance
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot.uptime = time.time()  # Track when the bot started
+
+initial_extensions = [
+    'cogs.chess_commands',
+    'cogs.management'
+]
 
 @bot.event
 async def on_ready():
@@ -41,16 +47,7 @@ async def on_ready():
         activity=discord.Game(name="Chess | /chess help")
     )
     
-    # Register chess commands
-    setup_chess_commands(bot)
-    logger.info("Chess commands registered")
-    
-    # Sync commands with Discord
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
+    logger.info("ChessBot is ready!")
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -83,11 +80,25 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     except Exception as e:
         logger.error(f"Failed to send error message: {e}")
 
+async def load_extensions():
+    """Load all extensions"""
+    for extension in initial_extensions:
+        try:
+            await bot.load_extension(extension)
+            logger.info(f"Loaded extension {extension}")
+        except Exception as e:
+            logger.error(f"Failed to load extension {extension}: {e}")
+            traceback.print_exc()
+
 def run_bot():
     """Run the bot"""
+    async def startup():
+        await load_extensions()
+        await bot.start(TOKEN)
+        
     try:
         logger.info("Starting ChessBot...")
-        bot.run(TOKEN)
+        asyncio.run(startup())
     except discord.errors.LoginFailure:
         logger.critical("Invalid Discord token. Please check your .env file.")
         sys.exit(1)
