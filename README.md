@@ -24,22 +24,40 @@ A Discord bot that allows users to play chess against each other directly in Dis
    ```
    python main.py
    ```
+9. After the bot is running, use the `!sync` command to sync slash commands to your server:
+   ```
+   !sync
+   ```
+   Or sync globally (takes up to an hour to propagate):
+   ```
+   !sync global
+   ```
 
 ## Commands
 
-All commands use the `/chess` prefix.
+All commands use the `/chess` prefix (slash command group).
 
 | Command | Description | Usage |
 |---------|-------------|-------|
 | `/chess help` | Display help information | `/chess help` |
-| `/chess challenge` | Challenge another user to a game | `/chess challenge @username` |
-| `/chess move` | Make a move in the current game | `/chess move e4` or `/chess move e2e4` |
+| `/chess challenge @username` | Challenge another user to a game | `/chess challenge @username` |
+| `/chess move e4` | Make a move in the current game | `/chess move e4` or `/chess move e2e4` |
 | `/chess board` | Display the current board state | `/chess board` |
 | `/chess resign` | Resign from the current game | `/chess resign` |
 | `/chess pgn` | Show the PGN of the current game | `/chess pgn` |
-| `/chess suggest` | Get move suggestions | `/chess suggest` |
+| `/chess suggest` | Get AI move suggestions | `/chess suggest` |
 | `/chess analyze` | Analyze the current position | `/chess analyze` |
 | `/chess explain` | Get a simple explanation of the current position | `/chess explain` |
+
+### Management Commands
+
+These commands are only available to the bot owner:
+
+| Command | Description | Usage |
+|---------|-------------|-------|
+| `!sync` | Sync slash commands to the current guild | `!sync` |
+| `!sync global` | Sync slash commands globally | `!sync global` |
+| `!status` | Check the bot's status | `!status` |
 
 ## Game Features
 
@@ -64,5 +82,6 @@ You can adjust the following settings in the `.env` file:
 - Logs are written to `chessbot.log` for troubleshooting
 - The bot supports multiple games across different channels
 - Uses Discord's slash command system for better user experience
+- Command registration is done manually via the `!sync` command
 
   Copyright 2025 CoinKing
